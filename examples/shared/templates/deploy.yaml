@@ -11,25 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-#@ load("@ytt:data", "data")
-
-
-
----
 #
 #
 
 
-
----
-#
-#
-
-
----
-#
-#
 # `app-deploy` instantiates a `kapp-ctrl/App` making use of an image that comes
 # as input in the form of `$(images.image.image)$`.
 #
