@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# `tekton-pipelinerun` has the template for the object that will be created
+# by a Runnable that references this ClusterRunTemplate. It defines a
+# tekton taskRun and expects inputs from the runnable (e.g. runnable.spec.inputs.params)
+# It finally specifies what outputs will be on the status of the Runnable
+# object (i.e. `url` and `revision`)
+#
 apiVersion: carto.run/v1alpha1
 kind: ClusterRunTemplate
 metadata:
