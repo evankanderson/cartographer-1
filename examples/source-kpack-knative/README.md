@@ -8,25 +8,24 @@ instance, https://github.com/vmware-tanzu/cartographer/tree/v0.0.7/examples).
 
 ---
 
-The [source-kpack-knative] example illustrates how an App Operator group could set up a software
+This example illustrates how an App Operator group could set up a software
 supply chain such that source code gets continuously built using the best
 practices from [buildpacks] via [kpack/Image] and deployed to the cluster using
-[knative-serving]. This example builds upon that and demonstrates how testing
-can be added to the supply chain.
+[knative-serving].
 
 
 ```
 
-  source --> tests --> image --> knative service
+  source --> image --> knative service
 
 ```
 
-The directories here are structured in a way to reflect which Kubernetes
+The example directories are structured in a way to reflect which Kubernetes
 objects would be set by the different personas in the system:
 
 
 ```
-  '── source-to-knative-service
+  '── shared | source-to-knative-service
       ├── 00-cluster                         preconfigured cluster-wide objects
       │                                        to configured systems other than
       │                                              cartographer (like, kpack)
@@ -45,27 +44,103 @@ objects would be set by the different personas in the system:
 
 ## Prerequisites
 
-1. Install the prerequisites of the [source-kpack-knative] example.
-
-2. This supply chain adds an additional dependency:
-
-- [tekton], for providing a mechanism to create pipelines (for application testing, scanning, etc)
+1. Kubernetes v1.19+
 
 ```bash
-TEKTON_VERSION=0.30.0
-
-kapp deploy --yes -a tekton \
-	-f https://storage.googleapis.com/tekton-releases/pipeline/previous/v0.30.0/release.yaml
+kind create cluster --image kindest/node:v1.21.1
 ```
+
+2. [carvel] tools for templating and groups of kubernetes objects to the api
+   server
+
+  - [ytt]: templating the credentials
+  - [kapp]: submitting objects to kubernetes
+
+
+3. Cartographer, and dependencies used in the example
+
+To install `cartographer`, refer to [README.md](../../README.md).
+
+All that `cartographer` does is choreograph the passing of results from a
+kubernetes object to another, following the graph described in the
+[ClusterSupplyChain] object.
+
+This means that `cartographer` by itself is not very useful - its powers arise
+from integrating other kubernetes resources that when tied together with a
+supplychain, forms something powerful.
+
+- [kpack], for providing an opinionated way of continuously building container
+  images using buildpacks
+
+```bash
+KPACK_VERSION=0.4.3
+
+kapp deploy --yes -a kpack \
+	-f https://github.com/pivotal/kpack/releases/download/v$KPACK_VERSION/release-$KPACK_VERSION.yaml
+```
+
+- [source-controller], for providing the ability to find new commits to a git
+  repository and making it internally available to other resources
+
+```bash
+kubectl create namespace gitops-toolkit
+
+# THIS CLUSTERROLEBINDING IS FOR DEMO PURPOSES ONLY - THIS WILL GRANT MORE PERMISSIONS THAN NECESSARY
+#
+kubectl create clusterrolebinding gitops-toolkit-admin \
+  --clusterrole=cluster-admin \
+  --serviceaccount=gitops-toolkit:default
+
+SOURCE_CONTROLLER_VERSION=0.17.0
+
+kapp deploy --yes -a gitops-toolkit \
+  --into-ns gitops-toolkit \
+  -f https://github.com/fluxcd/source-controller/releases/download/v$SOURCE_CONTROLLER_VERSION/source-controller.crds.yaml \
+  -f https://github.com/fluxcd/source-controller/releases/download/v$SOURCE_CONTROLLER_VERSION/source-controller.deployment.yaml
+```
+
+- [kapp-controller], for providing us with the ability of deploying multiple
+  Kubernetes objects as a single unit
+
+```bash
+KAPP_CONTROLLER_VERSION=0.30.0
+
+kapp deploy --yes -a kapp-controller \
+	-f https://github.com/vmware-tanzu/carvel-kapp-controller/releases/download/v$KAPP_CONTROLLER_VERSION/release.yml
+```
+
+- [knative-serving], for being the runtime of the application we want to deploy.
+
+```bash
+KNATIVE_SERVING_VERSION=0.26.0
+
+kapp deploy --yes -a knative-serving \
+  -f https://github.com/knative/serving/releases/download/v$KNATIVE_SERVING_VERSION/serving-crds.yaml \
+  -f https://github.com/knative/serving/releases/download/v$KNATIVE_SERVING_VERSION/serving-core.yaml
+```
+
+4. Authorization to push images to a container image registry
+
+As mentioned before, in this example we make use of `kpack` to build container
+images out of the source code and push to a container image registry,
+so we must provide a Kubernetes secret that contains the credentials for pushing to a
+registry (see [kpack secrets] to know more about how kpack makes use of it).
 
 
 ## Running the example in this directory
 
-As mentioned before, there are three directories: [./00-cluster](./00-cluster),
-for cluster-wide configuration, [./app-operator](./app-operator), with
-cartographer-specific files that an App Operator would submit, and
-[./developer](./developer), containing Kubernetes objects that a developer
-would submit (yes, just a [Workload] and a [Pipeline]!)
+This example uses two directories with sub-directories of kubernetes resources:
+[../shared](../shared) and [.](.).
+
+The shared directory has a subdirectory for cluster-wide configuration: [./00-cluster](./00-cluster)
+
+There is a subdirectory of cartographer-specific files that an App Operator would submit
+in both this and in the shared directory:
+[./app-operator](./app-operator) and [../shared/app-operator](../shared/app-operator) 
+
+Finally, in this and in the shared directory there is a subdirectory containing
+Kubernetes objects that a developer would submit: [./developer](./developer) and
+[../shared/developer](../shared/developer)
 
 Before we get started with the details pertaining to Cartographer, first we
 need to set up a few details related to where container images should be pushed
@@ -101,16 +176,28 @@ registry:
   password: a-very-hard-to-break-password
 ```
 
+Next the developer needs to give Cartographer permission to create the
+items that will be stamped out in the supply chain. That will be done
+with a service account, whose name will be referenced in the workload.
+You can update [`values.yaml`](./values.yaml) with the desired name:
+
+```yaml
+#@data/values
+---
+# a name that won't collide with other service accounts
+service_account_name: workload-service-account
+```
+
 That done, we can make use of `ytt` to interpolate those values into the
 templates, and then pass the result to [kapp] for submitting to Kubernetes
-(Ensure you are running this command from `examples/source-to-knative-service`):
+(Ensure you are running this command from `examples/source-kpack-knative`):
 
 ```bash
 # submit to Kubernetes all of the Kubernetes objects defined under this #
 # directory (recursively) making them all owned by a single "kapp App" named
 # "example".
 #
-ytt --ignore-unknown-comments -f . | kapp deploy --yes -a example -f-
+kapp deploy --yes -a example -f <(ytt --ignore-unknown-comments -f .) -f <(ytt --ignore-unknown-comments -f ../shared/ -f ./values.yaml)
 ```
 
 As Cartographer choreographs the resources that will drive the application from
@@ -123,9 +210,6 @@ $ kubectl tree workload dev
 NAMESPACE  NAME
 default    Workload/dev
 default    ├─GitRepository/dev                    source fetching
-default    ├─Runnable/dev                            test running
-default    │  └─TaskRun/dev-gdss4
-default    │    └─Pod/dev-gdss4-pod-xvrj5
 default    ├─Image/dev                             image building
 default    │ ├─Build/dev-build-1-5dxn9
 default    │ │ └─Pod/dev-build-1-5dxn9-build-pod
@@ -229,7 +313,7 @@ With the goal of creating a software supply chain like mentioned above
 
 ```
 
-  source --> test --> image --> knative service
+  source --> image --> knative service
 
 
 ```
@@ -244,58 +328,7 @@ code, and then based on that, building a container image and pushing that to a
 registry, which can then be made available for deployments further down the
 line.
 
-For instance, one can express the desire of continuously getting container
-images built based on a branch with the following [kpack/Image] definition:
-
-
-```yaml
-apiVersion: kpack.io/v1alpha2
-kind: Image
-metadata:
-  name: hello-world
-spec:
-  tag: projectcartographer/hello-world
-  serviceAccount: service-account
-  builder:
-    kind: ClusterBuilder
-    name: go-builder
-  source:
-    git:
-      url: https://github.com/kontinue/hello-world
-      revision: main
-```
-
-And that works great: push a commit to that repository, and `kpack` will build
-an image, exposing under the object's `.status.latestImage` the absolute
-reference to the image that has been built and pushed to a registry.
-
-
-```yaml
-apiVersion: kpack.io/v1alpha2
-kind: Image
-metadata:
-  name: hello-world
-spec:
-  source:
-    git: {url: https://github.com/kontinue/hello-world, revision: main}
-    ...
-status:
-	latestImage: index.docker.io/projectcartographer/hello-world@sha256:27452d42b
-```
-
-
-Even better, if there's an update to the base image that should be used to
-either build (for instance, `golang` bumped from 1.15 to 1.15.1 to address a
-security vulnerability) or run our application (let's say, a CA certificate
-should not be trusted anymore), even if there have been no changes to our
-source code, `kpack` would take care of building a fresh new image for us.
-
-While that's all great, we might want to actually gate the set of commits that
-should have images built for (for instance, only build those that passed
-tests), similar to what you'd want to do in a traditional pipeline, but not
-block those base image updates to occur.
-
-`kpack` does allow you to be very specific in terms of what to build, for
+`kpack` allows you to be very specific in terms of what to build, for
 instance, by specifying which revision to use:
 
 
@@ -312,12 +345,32 @@ spec:
   ...
 ```
 
-but then in that case, we'd need a way of updating that exact field
-(`spec.source.git.revision`) with the commits we want (i.e., those that passed
-our tests).
+
+Even better, if there's an update to the base image that should be used to
+either build (for instance, `golang` bumped from 1.15 to 1.15.1 to address a
+security vulnerability) or run our application (let's say, a CA certificate
+should not be trusted anymore), even if there have been no changes to our
+source code, `kpack` would take care of building a fresh new image for us.
+
+
+```yaml
+apiVersion: kpack.io/v1alpha2
+kind: Image
+metadata:
+  name: hello-world
+spec:
+  source:
+    git: {url: https://github.com/kontinue/hello-world, revision: main}
+    ...
+status:
+	latestImage: index.docker.io/projectcartographer/hello-world@sha256:27452d42b
+```
+
+
+but, we need a way of updating that exact field
+(`spec.source.git.revision`) with the commits we want.
 
 i.e., it'd be great if we could somehow express:
-
 
 ```yaml
 apiVersion: kpack.io/v1alpha2
@@ -328,13 +381,14 @@ spec:
   source:
     git:
       url: https://github.com/kontinue/hello-world
-      revision: $(commit_that_passed_tests)$
+      revision: $(most_recent_commit)$
   ...
 ```
 
 Not only that, it would be great if we could also make this reusable so that
 any developer wanting to have their code built, could _"just"_ get it done
 without having to know the details of `kpack`, something like
+
 
 ```yaml
 apiVersion: kpack.io/v1alpha2
@@ -345,7 +399,7 @@ spec:
   source:
     git:
       url: $(developer's_repository)
-      revision: $(commit_that_passed_tests)$
+      revision: $(most_recent_commit)$
   ...
 ```
 
@@ -403,7 +457,7 @@ metadata:
 spec:
   interval: 1m
   url: $(developers_repository)$
-  ref: {branch: $(branch_developers_want_to_deploy_from)}
+  ref: {branch: $(branch_developers_want_to_deploy_from)$}
 ```
 
 
@@ -758,19 +812,20 @@ spec:
 
 ### What next?
 
-The intention of this step-by-step guide was to demonstrate how the base shape
-of the supplychain in this repository is set up. This example supply chain has
-a little more to it (for instance, it leverages [Runnable] for declaratively
-expressing the desire of having PipelineRun objects being submitted when we
-detect new code changes), but the concepts remain the same.
+#### Swap out resources of the Supply Chain
 
 As you can tell, Cartographer is not necessarily tied to any of the resources
 utilized: if you want to switch [kpack] by any other image builder that does so
-with a declarative interface, go for it!
+with a declarative interface, go for it! Indeed, the YAML in this directory replace
+the `deployer` resource in the supply chain described here with a resource that
+leverages [knative] and [kapp-controller].
 
-Make sure to check out the [reference] to know more about Cartographer's custom
-resources, and the YAML in this directory for an example that leverages the
-same ideas here, but adds [knative] and [kapp-controller] to the mix.
+#### Expand on the Supply Chain
+
+The intention of this step-by-step guide was to illustrate the basic shape
+of the supplychain in this repository. Next, check out the
+[source-tekton-kpack-knative] example to see how testing can be added to the
+supply-chain.
 
 [ClusterBuilder]: https://github.com/pivotal/kpack/blob/main/docs/builders.md#cluster-builders
 [ClusterSupplyChain]: ../../site/content/docs/reference.md#ClusterSupplyChain
@@ -789,3 +844,4 @@ same ideas here, but adds [knative] and [kapp-controller] to the mix.
 [source-controller]: https://github.com/fluxcd/source-controller
 [ytt]: https://carvel.dev/ytt
 [tekton]: https://github.com/tektoncd/pipeline
+[source-tekton-kpack-knative]: ../source-tekton-kpack-knative/README.md
